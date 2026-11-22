@@ -23,6 +23,7 @@ final class NavLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
                                    options: [CBCentralManagerOptionRestoreIdentifierKey: "app.kite.navlink"])
     }
 
+    @MainActor
     func update(_ navigator: Navigator?) {
         guard let navigator else {
             navigationActive = false
