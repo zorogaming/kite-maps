@@ -5,6 +5,12 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      run_junctions:
+        description: Run the slow turn-by-turn junction regression suite
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -114,7 +120,7 @@ jobs:
   # (Actions > Build iPhone app > Run workflow).
   junctions:
     name: Junction check (${{ matrix.name }})
-    if: github.event_name == 'workflow_dispatch'
+    if: inputs.run_junctions
     runs-on: macos-15
     continue-on-error: true
     timeout-minutes: 100
