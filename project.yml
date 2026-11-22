@@ -38,9 +38,11 @@ targets:
         NSLocationAlwaysAndWhenInUseUsageDescription: Kite keeps guiding you with the screen off during navigation.
         NSMicrophoneUsageDescription: Kite listens when you tap the microphone to search by voice.
         NSSpeechRecognitionUsageDescription: Kite turns what you say into a search.
+        NSBluetoothAlwaysUsageDescription: Kite sends turn-by-turn navigation cues to your nearby MiniNav display.
         UIBackgroundModes:
           - location
           - audio
+          - bluetooth-central
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
           - UIInterfaceOrientationLandscapeLeft

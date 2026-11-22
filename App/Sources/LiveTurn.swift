@@ -14,8 +14,9 @@ final class LiveTurn {
     private var lastAt = Date.distantPast
 
     func start(_ n: Navigator) {
-        guard #available(iOS 16.2, *) else { return }
         end()
+        NavLink.shared.update(n)
+        guard #available(iOS 16.2, *) else { return }
         guard ActivityAuthorizationInfo().areActivitiesEnabled, n.route.mode == .drive else { return }
         let state = Self.state(n)
         do {
@@ -29,6 +30,7 @@ final class LiveTurn {
     }
 
     func update(_ n: Navigator) {
+        NavLink.shared.update(n)
         guard #available(iOS 16.2, *), let a = activity as? Activity<NavActivityAttributes> else { return }
         let state = Self.state(n)
         guard state != last as? NavActivityAttributes.ContentState, Date().timeIntervalSince(lastAt) >= 2 || state.arrived else { return }
@@ -38,6 +40,7 @@ final class LiveTurn {
     }
 
     func end() {
+        NavLink.shared.update(nil)
         guard #available(iOS 16.2, *) else { return }
         if let a = activity as? Activity<NavActivityAttributes> {
             Task { await a.end(nil, dismissalPolicy: .immediate) }
