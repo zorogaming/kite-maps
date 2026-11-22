@@ -60,11 +60,33 @@ final class NavLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
         case .keepRight, .forkRight, .rampRight: splitSide = "right"
         default: splitSide = ""
         }
+        let routeLine: String
+        let geometry = navigator.route.polyline
+        if geometry.count > 1, let progress = navigator.progress {
+            let cumulative = Geo.cumulative(geometry)
+            let bearing = progress.routeBearing * .pi / 180
+            let cosine = cos(bearing), sine = sin(bearing)
+            let latitudeScale = cos(progress.snapped.lat * .pi / 180) * 111_320.0
+            routeLine = (0..<8).map { index in
+                let point = Geo.point(along: geometry,
+                                      meters: min(cumulative.last ?? 0, progress.alongMeters + Double(index) * 40),
+                                      cumulative: cumulative)
+                let east = (point.lng - progress.snapped.lng) * latitudeScale
+                let north = (point.lat - progress.snapped.lat) * 110_540.0
+                let right = east * cosine - north * sine
+                let ahead = east * sine + north * cosine
+                let x = min(15, max(0, Int(((right + 80) / 160 * 15).rounded())))
+                let y = min(15, max(0, Int((ahead / 280 * 15).rounded())))
+                return String(format: "%1X%1X", x, y)
+            }.joined()
+        } else {
+            routeLine = ""
+        }
         let message: [String: Any] = [
             "v": 1,
             "active": true,
              "turn": maneuver?.type.rawValue ?? "straight",
-            "road": String((maneuver?.road ?? "").prefix(24)),
+            "road": String((maneuver?.road ?? "").prefix(16)),
             "distance_m": max(0, Int(distance.rounded())),
             "remaining_m": max(0, Int(remaining.rounded())),
             "eta_s": max(0, Int(left.rounded())),
@@ -73,7 +95,8 @@ final class NavLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
             "ex": max(0, maneuver?.exit ?? 0),
             "lc": laneCodes,
             "lm": String(laneMask, radix: 16, uppercase: true),
-            "lh": String((laneGuide?.words ?? "").prefix(18)),
+            "lh": String((laneGuide?.words ?? "").prefix(12)),
+            "rp": routeLine,
             "sd": splitSide == "left" ? "L" : (splitSide == "right" ? "R" : ""),
             "arrived": navigator.arrived
         ]
