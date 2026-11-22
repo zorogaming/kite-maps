@@ -36,15 +36,45 @@ final class NavLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
         let maneuver = navigator.nextManeuver
         let distance = navigator.progress?.distanceToNext ?? 0
         let left = navigator.progress?.remainingSeconds ?? navigator.route.durationSeconds
+        let remaining = navigator.progress?.remainingMeters ?? navigator.route.distanceMeters
+        let total = max(1, navigator.route.distanceMeters)
+        let progressPct = min(100, max(0, Int(((total - remaining) / total * 100).rounded())))
+        let laneGuide = maneuver.flatMap { LaneGuide.lanes(for: $0, leftTraffic: Geo.drivesOnLeft($0.location)) }
+        let laneItems = Array((laneGuide?.lanes ?? []).prefix(10))
+        let laneCodes = laneItems.map { lane -> String in
+            var bits = 0
+            for indication in lane.indications {
+                let word = indication.lowercased()
+                if word.contains("uturn") || word.contains("reverse") { bits |= 8 }
+                if word.contains("left") { bits |= 1 }
+                if word.contains("straight") || word.contains("through") { bits |= 2 }
+                if word.contains("right") { bits |= 4 }
+            }
+            return String(bits, radix: 16, uppercase: true)
+        }.joined()
+        var laneMask = 0
+        for (index, lane) in laneItems.enumerated() where lane.valid { laneMask |= 1 << index }
+        let splitSide: String
+        switch maneuver?.type {
+        case .keepLeft, .forkLeft, .rampLeft: splitSide = "left"
+        case .keepRight, .forkRight, .rampRight: splitSide = "right"
+        default: splitSide = ""
+        }
         let message: [String: Any] = [
             "v": 1,
             "active": true,
-            "turn": maneuver?.type.rawValue ?? "straight",
-            "instruction": navigator.arrived ? "Arrived" : String((maneuver?.instruction ?? "Continue").prefix(72)),
-            "road": String((maneuver?.road ?? "").prefix(40)),
+             "turn": maneuver?.type.rawValue ?? "straight",
+            "road": String((maneuver?.road ?? "").prefix(24)),
             "distance_m": max(0, Int(distance.rounded())),
-            "remaining_m": max(0, Int((navigator.progress?.remainingMeters ?? navigator.route.distanceMeters).rounded())),
+            "remaining_m": max(0, Int(remaining.rounded())),
             "eta_s": max(0, Int(left.rounded())),
+            "pr": progressPct,
+            "sp": max(0, Int((navigator.speedLimitKmh ?? 0).rounded())),
+            "ex": max(0, maneuver?.exit ?? 0),
+            "lc": laneCodes,
+            "lm": String(laneMask, radix: 16, uppercase: true),
+            "lh": String((laneGuide?.words ?? "").prefix(18)),
+            "sd": splitSide == "left" ? "L" : (splitSide == "right" ? "R" : ""),
             "arrived": navigator.arrived
         ]
         send(message)
