@@ -68,6 +68,8 @@ final class Navigator: ObservableObject {
     @Published private(set) var averageCheck: AverageCheck?
     /** Traffic lights on the route, one per junction, drawn on the map like Waze. */
     @Published private(set) var routeSignals: [LatLng] = []
+    private(set) var signalMeters: [Double] = []
+    private(set) var stopMeters: [Double] = []
 
     let destination: Place
     /** Stops still ahead, in trip order; each is dropped once reached. */
@@ -462,6 +464,8 @@ final class Navigator: ObservableObject {
         zoneEntry = nil
         averageCheck = nil
         routeSignals = []
+        signalMeters = []
+        stopMeters = []
         let s = AppSettings.shared
         guard route.mode == .drive else { return }
         let line = route.polyline, id = route.id
@@ -511,6 +515,12 @@ final class Navigator: ObservableObject {
             self.routeCameras = self.onOurSide(known.cams)
             self.zones = CameraAlerts.averageZones(known.cams)
             self.routeSignals = known.signals
+            let knownDistances = await Task.detached {
+                let cum = Geo.cumulative(line)
+                return known.signals.map { Geo.project($0, on: line, cumulative: cum) }
+                    .filter { $0.offset < 15 }.map(\.along).sorted()
+            }.value
+            if self.route.id == id && !self.fullRoadData { self.signalMeters = knownDistances }
         }
         Task { await useKnown() }
         // A small question about the first few miles gets answered far sooner by a busy server than
@@ -543,6 +553,12 @@ final class Navigator: ObservableObject {
             if !self.matchedLimits { self.route.speedLimits = Overpass.speedLimits(found.ways, on: line) }
             self.zones = CameraAlerts.merge(found.zones, CameraAlerts.averageZones(self.routeCameras))
             self.routeSignals = found.signals
+            let distances = await Task.detached {
+                found.signals.map { Geo.project($0, on: line, cumulative: cum).along }.sorted()
+            }.value
+            guard self.route.id == id else { return }
+            self.signalMeters = distances
+            self.stopMeters = found.stops
         }
     }
 

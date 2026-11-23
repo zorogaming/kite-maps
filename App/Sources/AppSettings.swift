@@ -110,7 +110,7 @@ final class AppSettings: ObservableObject {
 
     private init() {
         theme = ThemeMode(rawValue: d.string(forKey: "theme") ?? "") ?? .system
-        units = UnitsMode(rawValue: d.string(forKey: "units") ?? "") ?? .auto
+        units = UnitsMode(rawValue: d.string(forKey: "units") ?? "") ?? .metric
         voice = d.object(forKey: "voice") as? Bool ?? true
         voiceAlertsOnly = d.bool(forKey: "voiceAlertsOnly")
         traffic = d.object(forKey: "traffic") as? Bool ?? true

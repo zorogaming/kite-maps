@@ -123,14 +123,15 @@ public enum Overpass {
     /// [limits] false leaves the roads' speed limits out (the road matcher has them): the question is
     /// then far lighter, and a busy server that turns the full one away still answers it.
     public static func alongRoute(_ line: [LatLng], speed: Bool, plate: Bool, limits: Bool = true) async
-        -> (cameras: [RoadCamera], ways: [LimitWay], zones: [AverageSpeedZone], signals: [LatLng])? {
-        guard line.count >= 2 else { return ([], [], [], []) }
+        -> (cameras: [RoadCamera], ways: [LimitWay], zones: [AverageSpeedZone], signals: [LatLng], stops: [Double])? {
+        guard line.count >= 2 else { return ([], [], [], [], []) }
         // Long drives go in pieces of about 40 km: one query for a whole motorway trip is often
         // too much for the public servers.
         var cams: [Int64: RoadCamera] = [:]
         var ways: [LimitWay] = []
         var zones: [AverageSpeedZone] = []
         var signals: [LatLng] = []
+        var stopNodes: [LatLng] = []
         var answered = false
         // Waze's map is asked at the same time: it holds cameras OpenStreetMap doesn't.
         async let wazeFound: [RoadCamera]? = speed ? await WazeCameras.along(line) : nil
@@ -141,6 +142,7 @@ public enum Overpass {
             for c in found { cams[c.id] = c }
             ways += w
             zones += averageZones(data, on: line)
+            stopNodes += parseSignalNodes(data, highway: "stop").map(\.at)
             signals += lights.map(\.at)
             RoadCache.shared.add(ways: w, cameras: found, signals: lights)
             // This stretch's answer is the whole truth about its cameras: one the map has dropped goes.
@@ -148,7 +150,10 @@ public enum Overpass {
         }
         let waze = await wazeFound ?? []
         guard answered else { return nil }
-        return (WazeCameras.merge(Array(cams.values), waze: waze), ways, CameraAlerts.merge(zones, []), signalsOnRoute(signals, line: line))
+        let cum = Geo.cumulative(line)
+        let stops = stopNodes.map { Geo.project($0, on: line, cumulative: cum) }
+            .filter { $0.offset < 6 }.map(\.along).sorted()
+        return (WazeCameras.merge(Array(cams.values), waze: waze), ways, CameraAlerts.merge(zones, []), signalsOnRoute(signals, line: line), stops)
     }
 
     /** [line] cut into runs of about [meters], each sharing its first point with the last run's end. */
@@ -183,6 +188,7 @@ public enum Overpass {
         if limits { parts.append("way[\"highway\"][\"maxspeed\"](around:12,\(coords));") }
         if speed { parts.append("relation[\"enforcement\"=\"average_speed\"](around:200,\(coords));") }
         parts.append("node[\"highway\"=\"traffic_signals\"](around:50,\(coords));")
+        parts.append("node[\"highway\"=\"stop\"][\"stop\"=\"all\"](around:15,\(coords));")
         let q = "[out:json][timeout:40];(" + parts.joined() + ");out body geom 8000;"
         return await firstAnswer(q) { parse($0) != nil }
     }
@@ -241,11 +247,11 @@ public enum Overpass {
     /** Traffic light nodes in an answer (OSM `highway=traffic_signals`). */
     static func parseSignals(_ data: Data) -> [LatLng] { parseSignalNodes(data).map(\.at) }
 
-    static func parseSignalNodes(_ data: Data) -> [(id: Int64, at: LatLng)] {
+    static func parseSignalNodes(_ data: Data, highway: String = "traffic_signals") -> [(id: Int64, at: LatLng)] {
         guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let elements = root["elements"] as? [[String: Any]] else { return [] }
         return elements.compactMap { e in
-            guard (e["tags"] as? [String: String])?["highway"] == "traffic_signals",
+            guard (e["tags"] as? [String: String])?["highway"] == highway,
                   let lat = e["lat"] as? Double, let lon = e["lon"] as? Double else { return nil }
             return ((e["id"] as? NSNumber)?.int64Value ?? 0, LatLng(lat, lon))
         }

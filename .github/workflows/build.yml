@@ -11,6 +11,11 @@ on:
         required: false
         type: boolean
         default: false
+      ipa_runner:
+        description: Hosted Mac for the IPA job
+        type: choice
+        options: [xcode-27, macos-15]
+        default: xcode-27
       run_junctions:
         description: Run the slow turn-by-turn junction regression suite
         required: false
@@ -154,10 +159,11 @@ jobs:
     name: Build Kite.ipa
     # Xcode 27.1 (the iOS 27.1 SDK) is what lets Kite fill the iPhone Duo's screens; built with an
     # older Xcode it runs there small, with black bars.
-    runs-on: xcode-27
-    env:
-      DEVELOPER_DIR: /Applications/Xcode_27.1.app/Contents/Developer
+    runs-on: ${{ inputs.ipa_runner || 'xcode-27' }}
     steps:
+      - name: Select Xcode 27.1
+        if: ${{ inputs.ipa_runner != 'macos-15' }}
+        run: echo "DEVELOPER_DIR=/Applications/Xcode_27.1.app/Contents/Developer" >> "$GITHUB_ENV"
       - uses: actions/checkout@v4
       - name: Install XcodeGen
         run: brew install xcodegen

@@ -1488,7 +1488,7 @@ enum DetourText {
 /** Road numbers in an instruction ("I-80", "US 50", "CA 113", "A9"), for shields in the banner. */
 enum RoadRefs {
     static func find(_ text: String) -> [String] {
-        let pattern = #"\b(I|US|CA|SR|State Route|Route|Hwy|Highway|A|B|M|E|N|D|B|SS)[- ]?(\d{1,4}[A-Z]?)\b"#
+        let pattern = #"\b(I|US|CA|SR|State Route|Route|Hwy|Highway|NH|SH|A|B|M|E|N|D|B|SS)[- ]?(\d{1,4}[A-Z]?)\b"#
         guard let re = try? NSRegularExpression(pattern: pattern) else { return [] }
         let ns = text as NSString
         var out: [String] = []

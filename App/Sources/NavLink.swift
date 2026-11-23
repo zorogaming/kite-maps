@@ -237,7 +237,36 @@ final class NavLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate, C
             default: gpsBars = 1
             }
         }
+        let along = navigator.progress?.alongMeters ?? 0
+        func nearby(_ sorted: [Double], within meters: Double) -> Bool {
+            var lo = 0, hi = sorted.count
+            while lo < hi {
+                let mid = (lo + hi) / 2
+                if sorted[mid] < along { lo = mid + 1 } else { hi = mid }
+            }
+            return lo < sorted.count && sorted[lo] - along <= meters
+        }
+        let instruction = maneuver?.instruction ?? ""
+        var signs = 0
+        if nearby(navigator.signalMeters, within: 150) { signs |= 1 }
+        if navigator.cameraAhead?.kind == .speed { signs |= 2 }
+        if nearby(navigator.stopMeters, within: 100) ||
+            (distance <= 100 && instruction.localizedCaseInsensitiveContains("at the stop sign")) { signs |= 4 }
+        if let report = navigator.wazeAhead, [.hazard, .accident, .roadworks, .weather, .closure].contains(report.alert.kind) { signs |= 8 }
+        let roadRef = RoadRefs.find(instruction + " " + (maneuver?.road ?? "")).first ?? ""
+        let destination: String
+        if maneuver?.type == .arrive || navigator.arrived {
+            destination = navigator.destination.name
+        } else if let range = instruction.range(of: " towards ", options: [.backwards, .caseInsensitive])
+                        ?? instruction.range(of: " toward ", options: [.backwards, .caseInsensitive]) {
+            destination = String(instruction[range.upperBound...])
+        } else {
+            destination = ""
+        }
         let message: [String: Any] = [
+            "sg": signs,
+            "ref": String(roadRef.prefix(8)),
+            "dst": String(destination.prefix(16)),
             "bat": level >= 0 ? Int((level * 100).rounded()) + 1 : 0,
             "chg": phone.batteryState == .charging || phone.batteryState == .full,
             "gps": gpsBars,
