@@ -112,12 +112,32 @@ final class NavLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate, C
     private func routeCue(route: Route, along measured: Double) -> (path: String, cursor: String) {
         if cueRouteID != route.id { cacheRoute(route) }
         guard let total = routeDistances.last, total > 0, measured.isFinite,
-              route.polyline.count > 1 else { return (routePath, "") }
-        let point = Geo.point(along: route.polyline,
-                              meters: min(total, max(0, measured)),
-                              cumulative: routeDistances)
-        let coordinate = encodeRoutePoint(RoutePoint2D(x: point.lng * routeProjectionCos, y: point.lat))
-        return (routePath, String(format: "%02X%1X", coordinate.0, coordinate.1))
+              route.polyline.count > 1 else { return ("", "") }
+
+        // Keep the BLE cue compact: eight local XY nibble pairs (16 characters)
+        // describe the road ahead relative to the rider. The full-route overview
+        // made cue writes large enough for CoreBluetooth to use long writes.
+        let along = min(total, max(0, measured))
+        func point(_ meters: Double) -> LatLng {
+            Geo.point(along: route.polyline, meters: meters, cumulative: routeDistances)
+        }
+        let origin = point(along)
+        let before = point(max(0, along - 5))
+        let after = point(min(total, along + 12))
+        let heading = Geo.bearing(before, after) * .pi / 180
+        let cosine = cos(heading), sine = sin(heading)
+        let latitudeScale = max(0.01, cos(origin.lat * .pi / 180)) * 111_320.0
+        let path = (0..<8).map { index in
+            let next = point(min(total, along + Double(index) * 40))
+            let east = (next.lng - origin.lng) * latitudeScale
+            let north = (next.lat - origin.lat) * 110_540.0
+            let right = east * cosine - north * sine
+            let ahead = east * sine + north * cosine
+            let x = min(15, max(0, Int(((right + 80) / 160 * 15).rounded())))
+            let y = min(15, max(0, Int((ahead / 280 * 15).rounded())))
+            return String(format: "%1X%1X", x, y)
+        }.joined()
+        return (path, "")
     }
 
     private func roundaboutCue(_ maneuver: Maneuver?) -> [String: Any]? {
@@ -289,7 +309,9 @@ final class NavLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate, C
         let maxLength = peripheral.maximumWriteValueLength(for: .withResponse)
         let headerLength = 8
         guard maxLength > headerLength else { return }
-        let chunkLength = maxLength - headerLength
+        // Leave the frame comfortably below the negotiated ATT MTU so iOS sends
+        // an ordinary Write Request instead of a Prepare/Execute long write.
+        let chunkLength = min(maxLength - headerLength, 112)
         let chunkCount = max(1, (data.count + chunkLength - 1) / chunkLength)
         guard chunkCount <= 255 else { return }
         writeSequence &+= 1
