@@ -1,5 +1,6 @@
 import CoreBluetooth
 import Foundation
+import UIKit
 import VelaCore
 
 /** Sends the current navigation cue to a nearby MiniNav display over BLE. */
@@ -143,7 +144,23 @@ final class NavLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
         } else {
             routeLine = ""
         }
+        let phone = UIDevice.current
+        phone.isBatteryMonitoringEnabled = true
+        let level = phone.batteryLevel
+        var gpsBars = 0
+        if let fix = navigator.lastFix, abs(fix.timestamp.timeIntervalSinceNow) < 15,
+           fix.horizontalAccuracy >= 0 {
+            switch fix.horizontalAccuracy {
+            case ...8: gpsBars = 4
+            case ...20: gpsBars = 3
+            case ...50: gpsBars = 2
+            default: gpsBars = 1
+            }
+        }
         let message: [String: Any] = [
+            "bat": level >= 0 ? Int((level * 100).rounded()) + 1 : 0,
+            "chg": phone.batteryState == .charging || phone.batteryState == .full,
+            "gps": gpsBars,
             "v": 1,
             "active": true,
              "turn": maneuver?.type.rawValue ?? "straight",
