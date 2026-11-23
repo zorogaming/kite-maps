@@ -4,6 +4,11 @@ import Foundation
 import UIKit
 import VelaCore
 
+private struct RoutePoint2D {
+    let x: Double
+    let y: Double
+}
+
 /** Sends the current navigation cue to a nearby MiniNav display over BLE. */
 final class NavLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate, CXCallObserverDelegate {
     static let shared = NavLink()
@@ -21,79 +26,129 @@ final class NavLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate, C
     private let callObserver = CXCallObserver()
     private var callStatus = "none"
     private var latestCue: [String: Any] = ["v": 1, "active": false, "call": "none"]
+    private var writeFrames: [Data] = []
+    private var writeFrameIndex = 0
+    private var writeInProgress = false
+    private var currentWriteData: Data?
+    private var queuedWrite: Data?
+    private var writeSequence: UInt8 = 0
 
     private var cueRouteID: UUID?
     private var routeDistances: [Double] = []
-    private var cueEnd = 0.0
-    private var lastAlong = 0.0
-    private var cueVertices: [Double] = []
+    private var routeProjectionCos = 1.0
+    private var routeMinX = 0.0
+    private var routeMaxX = 0.0
+    private var routeMinY = 0.0
+    private var routeMaxY = 0.0
+    private var routeCoordinates: [(Int, Int)] = []
+    private var routePath = ""
 
-    // Keep the bends of one road section until the rider reaches its end.
-    private func roadCue(route: Route, along measured: Double, nextTurn: Double?) -> String {
-        let road = route.polyline
-        if cueRouteID != route.id {
-            cueRouteID = route.id
-            routeDistances = Geo.cumulative(road)
-            cueVertices = []
-        }
-        guard let total = routeDistances.last, total > 0, measured.isFinite else { return "" }
-        let reset = cueVertices.isEmpty || measured < lastAlong - 25
-        let along = min(total, max(0, reset ? measured : max(lastAlong, measured)))
-        lastAlong = along
-        func point(_ m: Double) -> LatLng {
-            Geo.point(along: road, meters: m, cumulative: routeDistances)
-        }
-        if reset || along >= cueEnd {
-            let target = nextTurn.flatMap { $0 > along ? $0 + 25 : nil } ?? total
-            cueEnd = min(total, min(along + 240, target))
-            // Preserve actual corner vertices. Spend each available BLE point on
-            // the largest remaining deviation from a straight segment.
-            var anchors = [along, cueEnd]
-            let vertices = routeDistances.filter { $0 > along && $0 < cueEnd }
-            let longitudeScale = cos(point(along).lat * .pi / 180)
-            while anchors.count < 8 {
-                var largest = 0.000012
-                var best: Double?
-                for (start, end) in zip(anchors, anchors.dropFirst()) {
-                    let a = point(start), b = point(end)
-                    let dx = (b.lng - a.lng) * longitudeScale, dy = b.lat - a.lat
-                    for m in vertices where m > start && m < end {
-                        let v = point(m)
-                        let x = (v.lng - a.lng) * longitudeScale, y = v.lat - a.lat
-                        let t = min(1, max(0, (x * dx + y * dy) / max(1e-18, dx * dx + dy * dy)))
-                        let error = hypot(x - t * dx, y - t * dy)
-                        if error > largest { largest = error; best = m }
-                    }
-                }
-                guard let best else { break }
-                anchors.append(best)
-                anchors.sort()
+    private func simplified(_ points: [RoutePoint2D], tolerance: Double) -> [RoutePoint2D] {
+        guard points.count > 2 else { return points }
+        var keep = [Bool](repeating: false, count: points.count)
+        keep[0] = true
+        keep[points.count - 1] = true
+        var ranges: [(Int, Int)] = [(0, points.count - 1)]
+        let toleranceSquared = tolerance * tolerance
+        while let (start, end) = ranges.popLast() {
+            guard end > start + 1 else { continue }
+            let a = points[start], b = points[end]
+            let dx = b.x - a.x, dy = b.y - a.y
+            var largest = toleranceSquared
+            var best: Int?
+            for index in (start + 1)..<end {
+                let p = points[index]
+                let t = min(1, max(0, ((p.x - a.x) * dx + (p.y - a.y) * dy) /
+                                  max(1e-12, dx * dx + dy * dy)))
+                let ex = p.x - (a.x + t * dx), ey = p.y - (a.y + t * dy)
+                let error = ex * ex + ey * ey
+                if error > largest { largest = error; best = index }
             }
-            cueVertices = anchors
+            if let best {
+                keep[best] = true
+                ranges.append((start, best))
+                ranges.append((best, end))
+            }
         }
-        let origin = point(along)
-        let heading = Geo.bearing(point(max(0, along - 5)), point(min(total, along + 12))) * .pi / 180
-        var encoded = "80"
-        var lastX = 8.0, lastY = 0.0
-        for m in cueVertices where m > along {
-            let v = point(m)
-            let east = (v.lng - origin.lng) * cos(origin.lat * .pi / 180) * 111320
-            let north = (v.lat - origin.lat) * 110540
-            let x = 8 + (east * cos(heading) - north * sin(heading)) / 20
-            let y = (east * sin(heading) + north * cos(heading)) / 10
-            // End the visible road at the first viewport crossing, so an
-            // off-screen bend cannot turn into a false line along the edge.
-            var t = 1.0
-            if x < 0 { t = min(t, -lastX / (x - lastX)) }
-            if x > 15 { t = min(t, (15 - lastX) / (x - lastX)) }
-            if y < 0 { t = min(t, -lastY / (y - lastY)) }
-            if y > 15 { t = min(t, (15 - lastY) / (y - lastY)) }
-            encoded += String(format: "%1X%1X", Int((lastX + t * (x - lastX)).rounded()),
-                              Int((lastY + t * (y - lastY)).rounded()))
-            if t < 1 { break }
-            lastX = x; lastY = y
+        return points.indices.compactMap { keep[$0] ? points[$0] : nil }
+    }
+
+    // Cache the whole route once. Coordinates are a compact 32x16 overview; the cursor moves on it.
+    private func cacheRoute(_ route: Route) {
+        cueRouteID = route.id
+        routeDistances = Geo.cumulative(route.polyline)
+        routeCoordinates = []
+        routePath = ""
+        guard route.polyline.count > 1 else { return }
+        let referenceLatitude = route.polyline.map(\.lat).reduce(0, +) / Double(route.polyline.count)
+        routeProjectionCos = max(0.01, cos(referenceLatitude * .pi / 180))
+        let projected = route.polyline.map {
+            RoutePoint2D(x: $0.lng * routeProjectionCos, y: $0.lat)
         }
-        return encoded.count == 2 ? encoded + "80" : encoded
+        var tolerance = 0.00002
+        var reduced = simplified(projected, tolerance: tolerance)
+        while reduced.count > 24 {
+            tolerance *= 1.7
+            reduced = simplified(projected, tolerance: tolerance)
+        }
+        routeMinX = reduced.map(\.x).min() ?? 0
+        routeMaxX = reduced.map(\.x).max() ?? 0
+        routeMinY = reduced.map(\.y).min() ?? 0
+        routeMaxY = reduced.map(\.y).max() ?? 0
+        routeCoordinates = reduced.map(encodeRoutePoint)
+        routePath = routeCoordinates.map { String(format: "%02X%1X", $0.0, $0.1) }.joined()
+    }
+
+    private func encodeRoutePoint(_ point: RoutePoint2D) -> (Int, Int) {
+        let width = routeMaxX - routeMinX
+        let height = routeMaxY - routeMinY
+        let nx = width > 1e-10 ? (point.x - routeMinX) / width : 0.5
+        let ny = height > 1e-10 ? (routeMaxY - point.y) / height : 0.5
+        let x = min(30, max(1, Int((1 + nx * 29).rounded())))
+        let y = min(14, max(1, Int((1 + ny * 13).rounded())))
+        return (x, y)
+    }
+
+    private func routeCue(route: Route, along measured: Double) -> (path: String, cursor: String) {
+        if cueRouteID != route.id { cacheRoute(route) }
+        guard let total = routeDistances.last, total > 0, measured.isFinite,
+              route.polyline.count > 1 else { return (routePath, "") }
+        let point = Geo.point(along: route.polyline,
+                              meters: min(total, max(0, measured)),
+                              cumulative: routeDistances)
+        let coordinate = encodeRoutePoint(RoutePoint2D(x: point.lng * routeProjectionCos, y: point.lat))
+        return (routePath, String(format: "%02X%1X", coordinate.0, coordinate.1))
+    }
+
+    private func roundaboutCue(_ maneuver: Maneuver?) -> [String: Any]? {
+        guard let maneuver, maneuver.type == .roundabout else { return nil }
+        let shape = maneuver.roundabout
+        let clockwise = shape?.clockwise ?? Geo.drivesOnLeft(maneuver.location)
+        let exit = max(1, maneuver.exit ?? 1)
+        var exits = shape?.exits ?? []
+        if exits.isEmpty {
+            let count = min(12, exit)
+            let step = min(90.0, 300.0 / Double(count + 1))
+            let sign = clockwise ? 1.0 : -1.0
+            exits = (1...count).map { index in
+                (180 + sign * Double(index) * step + 360)
+                    .truncatingRemainder(dividingBy: 360)
+            }
+        }
+        let normalized: (Double) -> Int = { angle in
+            let degrees = (angle.truncatingRemainder(dividingBy: 360) + 360)
+                .truncatingRemainder(dividingBy: 360)
+            return Int(degrees.rounded()) % 360
+        }
+        let exitList = Array(exits.prefix(12)).map(normalized)
+        let entryList = Array((shape?.entriesOnly ?? []).prefix(12)).map(normalized)
+        return [
+            "e": exitList,
+            "i": entryList,
+            "t": min(max(0, shape?.taken ?? exit - 1), max(0, exitList.count - 1)),
+            "c": clockwise,
+            "m": shape?.mini ?? false
+        ]
     }
 
     private override init() {
@@ -126,7 +181,10 @@ final class NavLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate, C
     @MainActor
     func update(_ navigator: Navigator?) {
         guard let navigator else {
-            cueVertices = []
+            cueRouteID = nil
+            routeDistances = []
+            routeCoordinates = []
+            routePath = ""
             navigationActive = false
             latestCue = ["v": 1, "active": false, "call": callStatus]
             send(latestCue)
@@ -163,13 +221,12 @@ final class NavLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate, C
         case .keepRight, .forkRight, .rampRight: splitSide = "right"
         default: splitSide = ""
         }
-        let routeLine: String
+        let routeCue: (path: String, cursor: String)
         let geometry = navigator.route.polyline
-        if geometry.count > 1, let progress = navigator.progress {
-            routeLine = roadCue(route: navigator.route, along: progress.alongMeters,
-                                nextTurn: maneuver?.alongMeters)
+        if geometry.count > 1 {
+            routeCue = self.routeCue(route: navigator.route, along: navigator.progress?.alongMeters ?? 0)
         } else {
-            routeLine = ""
+            routeCue = ("", "")
         }
         let phone = UIDevice.current
         phone.isBatteryMonitoringEnabled = true
@@ -199,10 +256,12 @@ final class NavLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate, C
             "pr": progressPct,
             "sp": max(0, Int((navigator.speedLimitKmh ?? 0).rounded())),
             "ex": max(0, maneuver?.exit ?? 0),
+            "rb": roundaboutCue(maneuver).map { $0 as Any } ?? NSNull(),
             "lc": laneCodes,
             "lm": String(laneMask, radix: 16, uppercase: true),
             "lh": String((laneGuide?.words ?? "").prefix(12)),
-            "rp": routeLine,
+            "rp": routeCue.path,
+            "rc": routeCue.cursor,
             "sd": splitSide == "left" ? "L" : (splitSide == "right" ? "R" : ""),
             "arrived": navigator.arrived
         ]
@@ -216,10 +275,53 @@ final class NavLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate, C
         guard central.state == .poweredOn else { return }
         if let display, let cue {
             guard data != lastSent else { return }
-            display.writeValue(data, for: cue, type: .withResponse)
-            lastSent = data
+            if writeInProgress {
+                queuedWrite = data
+            } else {
+                transmit(data, to: display, characteristic: cue)
+            }
         } else if central.state == .poweredOn, display == nil {
             central.scanForPeripherals(withServices: [Self.serviceUUID], options: nil)
+        }
+    }
+
+    private func transmit(_ data: Data, to peripheral: CBPeripheral, characteristic: CBCharacteristic) {
+        let maxLength = peripheral.maximumWriteValueLength(for: .withResponse)
+        let headerLength = 8
+        guard maxLength > headerLength else { return }
+        let chunkLength = maxLength - headerLength
+        let chunkCount = max(1, (data.count + chunkLength - 1) / chunkLength)
+        guard chunkCount <= 255 else { return }
+        writeSequence &+= 1
+        writeFrames = (0..<chunkCount).map { index in
+            let start = index * chunkLength
+            let end = min(data.count, start + chunkLength)
+            let header = Data(String(format: "~%02X%02X%02X:", writeSequence, index, chunkCount).utf8)
+            var frame = header
+            frame.append(data.subdata(in: start..<end))
+            return frame
+        }
+        writeFrameIndex = 0
+        writeInProgress = true
+        currentWriteData = data
+        peripheral.writeValue(writeFrames[0], for: characteristic, type: .withResponse)
+    }
+
+    private func writeNextFrame(on peripheral: CBPeripheral) {
+        guard let cue else { return }
+        writeFrameIndex += 1
+        if writeFrameIndex < writeFrames.count {
+            peripheral.writeValue(writeFrames[writeFrameIndex], for: cue, type: .withResponse)
+            return
+        }
+        writeInProgress = false
+        writeFrames = []
+        lastSent = currentWriteData
+        currentWriteData = nil
+        if let queued = queuedWrite {
+            queuedWrite = nil
+            pending = queued
+            if queued != lastSent { transmit(queued, to: peripheral, characteristic: cue) }
         }
     }
 
@@ -253,6 +355,9 @@ final class NavLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate, C
     func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
         display = nil
         cue = nil
+        writeFrames = []
+        writeInProgress = false
+        currentWriteData = nil
         if navigationActive { central.scanForPeripherals(withServices: [Self.serviceUUID], options: nil) }
     }
 
@@ -260,6 +365,10 @@ final class NavLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate, C
         display = nil
         cue = nil
         lastSent = nil
+        writeFrames = []
+        writeInProgress = false
+        currentWriteData = nil
+        queuedWrite = nil
         if central.state == .poweredOn, navigationActive { central.scanForPeripherals(withServices: [Self.serviceUUID], options: nil) }
     }
 
@@ -270,10 +379,23 @@ final class NavLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate, C
 
     func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
         cue = service.characteristics?.first(where: { $0.uuid == Self.cueUUID })
-        if let pending, let cue { peripheral.writeValue(pending, for: cue, type: .withResponse); lastSent = pending }
+        if let pending, let cue { transmit(pending, to: peripheral, characteristic: cue) }
     }
 
     func peripheral(_ peripheral: CBPeripheral, didWriteValueFor characteristic: CBCharacteristic, error: Error?) {
-        if error != nil { lastSent = nil }
+        guard characteristic.uuid == Self.cueUUID else { return }
+        if error != nil {
+            lastSent = nil
+            writeFrames = []
+            writeInProgress = false
+            currentWriteData = nil
+            if let queued = queuedWrite {
+                queuedWrite = nil
+                pending = queued
+                if let cue { transmit(queued, to: peripheral, characteristic: cue) }
+            }
+            return
+        }
+        writeNextFrame(on: peripheral)
     }
 }
