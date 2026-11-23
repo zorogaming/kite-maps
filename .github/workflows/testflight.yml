@@ -1,20 +1,18 @@
-name: Upload iPhone app to TestFlight
+name: Build iPhone IPA
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: testflight-upload
-  cancel-in-progress: false
+  group: ipa-build
+  cancel-in-progress: true
 
 jobs:
-  upload:
-    name: Archive, sign and upload Kite Maps
+  build:
+    name: Archive and export Kite Maps IPA
     runs-on: xcode-27
     timeout-minutes: 60
     env:
@@ -100,12 +98,10 @@ jobs:
             -authenticationKeyIssuerID "$APPSTORE_ISSUER_ID"
           test -s "$RUNNER_TEMP/KiteExport/Kite.ipa"
 
-      - name: Upload build to TestFlight
-        uses: apple-actions/upload-testflight-build@v5
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
         with:
-          app-path: ${{ runner.temp }}/KiteExport/Kite.ipa
-          issuer-id: ${{ vars.APPSTORE_ISSUER_ID }}
-          api-key-id: ${{ vars.APPSTORE_API_KEY_ID }}
-          api-private-key: ${{ secrets.APPSTORE_API_PRIVATE_KEY }}
-          uses-non-exempt-encryption: 'false'
-          wait-for-processing: 'false'
+          name: Kite-call-alert-IPA-${{ github.run_number }}
+          path: ${{ runner.temp }}/KiteExport/Kite.ipa
+          if-no-files-found: error
+          retention-days: 14
