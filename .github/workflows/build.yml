@@ -6,6 +6,11 @@ on:
   pull_request:
   workflow_dispatch:
     inputs:
+      ipa_only:
+        description: Build and upload only the IPA artifact
+        required: false
+        type: boolean
+        default: false
       run_junctions:
         description: Run the slow turn-by-turn junction regression suite
         required: false
@@ -23,6 +28,7 @@ concurrency:
 jobs:
   core:
     name: Check search code
+    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.ipa_only }}
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
@@ -120,7 +126,7 @@ jobs:
   # (Actions > Build iPhone app > Run workflow).
   junctions:
     name: Junction check (${{ matrix.name }})
-    if: inputs.run_junctions
+    if: ${{ inputs.run_junctions && !inputs.ipa_only }}
     runs-on: macos-15
     continue-on-error: true
     timeout-minutes: 100
@@ -246,6 +252,7 @@ jobs:
 
   duo:
     name: Screenshots (iPhone Duo)
+    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.ipa_only }}
     runs-on: xcode-27
     # Only a look at the foldable; never holds up the build.
     continue-on-error: true
@@ -307,6 +314,7 @@ jobs:
 
   screens:
     name: Screenshots (simulator)
+    if: ${{ github.event_name != 'workflow_dispatch' || !inputs.ipa_only }}
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
