@@ -30,38 +30,88 @@ final class NavLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate, C
 
     private var cueRouteID: UUID?
     private var routeDistances: [Double] = []
-    private func routeCue(route: Route, along measured: Double) -> (path: String, cursor: String) {
+    private var cueEnd = 0.0
+    private var lastAlong = 0.0
+    private var cueAnchors: [Double] = []
+    private var cueCoordinates: [(Int, Int)] = []
+    private var cuePath = ""
+
+    private func routeCue(route: Route, along measured: Double, nextTurn: Double?) -> (path: String, cursor: String, segment: Int) {
         if cueRouteID != route.id {
             cueRouteID = route.id
             routeDistances = Geo.cumulative(route.polyline)
+            cueAnchors = []
         }
         guard let total = routeDistances.last, total > 0, measured.isFinite,
-              route.polyline.count > 1 else { return ("", "") }
-
-        // Keep the BLE cue compact: eight local XY nibble pairs (16 characters)
-        // describe the road ahead relative to the rider. The full-route overview
-        // is not needed by the local cue renderer.
-        let along = min(total, max(0, measured))
+              route.polyline.count > 1 else { return ("", "", 0) }
+        let reset = cueAnchors.isEmpty || measured < lastAlong - 25
+        let along = min(total, max(0, reset ? measured : max(lastAlong, measured)))
+        lastAlong = along
         func point(_ meters: Double) -> LatLng {
             Geo.point(along: route.polyline, meters: meters, cumulative: routeDistances)
         }
-        let origin = point(along)
-        let before = point(max(0, along - 5))
-        let after = point(min(total, along + 12))
-        let heading = Geo.bearing(before, after) * .pi / 180
-        let cosine = cos(heading), sine = sin(heading)
-        let latitudeScale = max(0.01, cos(origin.lat * .pi / 180)) * 111_320.0
-        let path = (0..<8).map { index in
-            let next = point(min(total, along + Double(index) * 40))
-            let east = (next.lng - origin.lng) * latitudeScale
-            let north = (next.lat - origin.lat) * 110_540.0
-            let right = east * cosine - north * sine
-            let ahead = east * sine + north * cosine
-            let x = min(15, max(0, Int(((right + 80) / 160 * 15).rounded())))
-            let y = min(15, max(0, Int((ahead / 280 * 15).rounded())))
-            return String(format: "%1X%1X", x, y)
-        }.joined()
-        return (path, "")
+        // Freeze this short section's geometry and orientation until the rider
+        // reaches its end. Only its cursor changes between GPS updates.
+        if reset || (along >= cueEnd && cueEnd < total) {
+            let target = nextTurn.flatMap { $0 > along ? max(along + 40, $0 + 25) : nil } ?? total
+            cueEnd = min(total, min(along + 240, target))
+            var anchors = [along, cueEnd]
+            let vertices = routeDistances.filter { $0 > along && $0 < cueEnd }
+            let origin = point(along)
+            let longitudeScale = max(0.01, cos(origin.lat * .pi / 180)) * 111_320.0
+            let heading = Geo.bearing(origin, point(min(total, along + 12))) * .pi / 180
+            let cosine = cos(heading), sine = sin(heading)
+            func projected(_ meters: Double) -> (Double, Double) {
+                let p = point(meters)
+                let east = (p.lng - origin.lng) * longitudeScale
+                let north = (p.lat - origin.lat) * 110_540.0
+                return (east * cosine - north * sine, east * sine + north * cosine)
+            }
+            // Spend the eight-point budget on actual bends rather than eight
+            // equally spaced samples that can cut off a junction's corner.
+            while anchors.count < 8 {
+                var largest = 4.0
+                var best: Double?
+                for (start, end) in zip(anchors, anchors.dropFirst()) {
+                    let a = projected(start), b = projected(end)
+                    let dx = b.0 - a.0, dy = b.1 - a.1
+                    for m in vertices where m > start && m < end {
+                        let v = projected(m)
+                        let t = min(1, max(0, ((v.0 - a.0) * dx + (v.1 - a.1) * dy) / max(1e-9, dx * dx + dy * dy)))
+                        let error = pow(v.0 - a.0 - t * dx, 2) + pow(v.1 - a.1 - t * dy, 2)
+                        if error > largest { largest = error; best = m }
+                    }
+                }
+                guard let best else { break }
+                anchors.append(best)
+                anchors.sort()
+            }
+            let points = anchors.map(projected)
+            let minX = points.map { $0.0 }.min() ?? 0
+            let maxX = points.map { $0.0 }.max() ?? 0
+            let minY = points.map { $0.1 }.min() ?? 0
+            let maxY = points.map { $0.1 }.max() ?? 0
+            let scale = min(165 / max(1, maxX - minX), 75 / max(1, maxY - minY))
+            let padX = (165 - (maxX - minX) * scale) / 2
+            let padY = (75 - (maxY - minY) * scale) / 2
+            cueCoordinates = points.map { p in
+                let x = min(15, max(0, Int(((p.0 - minX) * scale + padX) / 11.0 + 0.5)))
+                let y = min(15, max(0, Int(((p.1 - minY) * scale + padY) / 5.0 + 0.5)))
+                return (x, y)
+            }
+            cueAnchors = anchors
+            cuePath = cueCoordinates.map { String(format: "%1X%1X", $0.0, $0.1) }.joined()
+        }
+        guard cueCoordinates.count >= 2 else { return ("", "", 0) }
+        var i = 0
+        while i + 2 < cueAnchors.count && along > cueAnchors[i + 1] { i += 1 }
+        let f = min(1, max(0, (along - cueAnchors[i]) / max(0.001, cueAnchors[i + 1] - cueAnchors[i])))
+        let a = cueCoordinates[i], b = cueCoordinates[i + 1]
+        let x = Int(((Double(a.0) + Double(b.0 - a.0) * f) * 16).rounded())
+        let y = Int(((Double(a.1) + Double(b.1 - a.1) * f) * 16).rounded())
+        // A four-character cursor adds fractional precision to the same 16-char
+        // path. It is interpolated on the transmitted line, never beside it.
+        return (cuePath, String(format: "%02X%02X", x, y), i)
     }
 
     private func roundaboutCue(_ maneuver: Maneuver?) -> [String: Any]? {
@@ -127,6 +177,9 @@ final class NavLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate, C
         guard let navigator else {
             cueRouteID = nil
             routeDistances = []
+            cueAnchors = []
+            cueCoordinates = []
+            cuePath = ""
             navigationActive = false
             latestCue = ["v": 1, "active": false, "call": callStatus]
             send(latestCue)
@@ -163,12 +216,13 @@ final class NavLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate, C
         case .keepRight, .forkRight, .rampRight: splitSide = "right"
         default: splitSide = ""
         }
-        let routeCue: (path: String, cursor: String)
+        let routeCue: (path: String, cursor: String, segment: Int)
         let geometry = navigator.route.polyline
         if geometry.count > 1 {
-            routeCue = self.routeCue(route: navigator.route, along: navigator.progress?.alongMeters ?? 0)
+            routeCue = self.routeCue(route: navigator.route, along: navigator.progress?.alongMeters ?? 0,
+                                     nextTurn: maneuver?.alongMeters)
         } else {
-            routeCue = ("", "")
+            routeCue = ("", "", 0)
         }
         let phone = UIDevice.current
         phone.isBatteryMonitoringEnabled = true
@@ -204,6 +258,8 @@ final class NavLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate, C
             "lh": String((laneGuide?.words ?? "").prefix(12)),
             "rp": routeCue.path,
             "rpf": 2,
+            "rc": routeCue.cursor,
+            "ri": routeCue.segment,
             "sd": splitSide == "left" ? "L" : (splitSide == "right" ? "R" : ""),
             "arrived": navigator.arrived
         ]
