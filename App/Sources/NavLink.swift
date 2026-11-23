@@ -1,10 +1,11 @@
 import CoreBluetooth
+import CallKit
 import Foundation
 import UIKit
 import VelaCore
 
 /** Sends the current navigation cue to a nearby MiniNav display over BLE. */
-final class NavLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
+final class NavLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate, CXCallObserverDelegate {
     static let shared = NavLink()
 
     // Keep these UUIDs in sync with the ESP32 GATT service in MiniNav.
@@ -17,6 +18,9 @@ final class NavLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     private var pending: Data?
     private var lastSent: Data?
     private var navigationActive = false
+    private let callObserver = CXCallObserver()
+    private var callStatus = "none"
+    private var latestCue: [String: Any] = ["v": 1, "active": false, "call": "none"]
 
     private var cueRouteID: UUID?
     private var routeDistances: [Double] = []
@@ -96,6 +100,27 @@ final class NavLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
         super.init()
         central = CBCentralManager(delegate: self, queue: .main,
                                    options: [CBCentralManagerOptionRestoreIdentifierKey: "app.kite.navlink"])
+        callObserver.setDelegate(self, queue: .main)
+    }
+
+    private func currentCallStatus() -> String {
+        let activeCalls = callObserver.calls.filter { !$0.hasEnded }
+        if activeCalls.contains(where: { !$0.isOutgoing && !$0.hasConnected }) { return "incoming" }
+        if activeCalls.contains(where: { $0.hasConnected }) { return "active" }
+        return "none"
+    }
+
+    private func refreshCallStatus() {
+        let next = currentCallStatus()
+        guard next != callStatus else { return }
+        callStatus = next
+        guard navigationActive else { return }
+        latestCue["call"] = next
+        send(latestCue)
+    }
+
+    func callObserver(_ callObserver: CXCallObserver, callChanged call: CXCall) {
+        refreshCallStatus()
     }
 
     @MainActor
@@ -103,11 +128,13 @@ final class NavLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
         guard let navigator else {
             cueVertices = []
             navigationActive = false
-            send(["v": 1, "active": false])
+            latestCue = ["v": 1, "active": false, "call": callStatus]
+            send(latestCue)
             central.stopScan()
             return
         }
         navigationActive = true
+        callStatus = currentCallStatus()
 
         let maneuver = navigator.nextManeuver
         let distance = navigator.progress?.distanceToNext ?? 0
@@ -163,6 +190,7 @@ final class NavLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
             "gps": gpsBars,
             "v": 1,
             "active": true,
+            "call": callStatus,
              "turn": maneuver?.type.rawValue ?? "straight",
             "road": String((maneuver?.road ?? "").prefix(16)),
             "distance_m": max(0, Int(distance.rounded())),
@@ -178,6 +206,7 @@ final class NavLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
             "sd": splitSide == "left" ? "L" : (splitSide == "right" ? "R" : ""),
             "arrived": navigator.arrived
         ]
+        latestCue = message
         send(message)
     }
 
