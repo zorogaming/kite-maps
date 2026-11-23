@@ -17,6 +17,80 @@ final class NavLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     private var lastSent: Data?
     private var navigationActive = false
 
+    private var cueRouteID: UUID?
+    private var routeDistances: [Double] = []
+    private var cueEnd = 0.0
+    private var lastAlong = 0.0
+    private var cueVertices: [Double] = []
+
+    // Keep the bends of one road section until the rider reaches its end.
+    private func roadCue(route: Route, along measured: Double, nextTurn: Double?) -> String {
+        let road = route.polyline
+        if cueRouteID != route.id {
+            cueRouteID = route.id
+            routeDistances = Geo.cumulative(road)
+            cueVertices = []
+        }
+        guard let total = routeDistances.last, total > 0, measured.isFinite else { return "" }
+        let reset = cueVertices.isEmpty || measured < lastAlong - 25
+        let along = min(total, max(0, reset ? measured : max(lastAlong, measured)))
+        lastAlong = along
+        func point(_ m: Double) -> LatLng {
+            Geo.point(along: road, meters: m, cumulative: routeDistances)
+        }
+        if reset || along >= cueEnd {
+            let target = nextTurn.flatMap { $0 > along ? $0 + 25 : nil } ?? total
+            cueEnd = min(total, min(along + 240, target))
+            // Preserve actual corner vertices. Spend each available BLE point on
+            // the largest remaining deviation from a straight segment.
+            var anchors = [along, cueEnd]
+            let vertices = routeDistances.filter { $0 > along && $0 < cueEnd }
+            let longitudeScale = cos(point(along).lat * .pi / 180)
+            while anchors.count < 8 {
+                var largest = 0.000012
+                var best: Double?
+                for (start, end) in zip(anchors, anchors.dropFirst()) {
+                    let a = point(start), b = point(end)
+                    let dx = (b.lng - a.lng) * longitudeScale, dy = b.lat - a.lat
+                    for m in vertices where m > start && m < end {
+                        let v = point(m)
+                        let x = (v.lng - a.lng) * longitudeScale, y = v.lat - a.lat
+                        let t = min(1, max(0, (x * dx + y * dy) / max(1e-18, dx * dx + dy * dy)))
+                        let error = hypot(x - t * dx, y - t * dy)
+                        if error > largest { largest = error; best = m }
+                    }
+                }
+                guard let best else { break }
+                anchors.append(best)
+                anchors.sort()
+            }
+            cueVertices = anchors
+        }
+        let origin = point(along)
+        let heading = Geo.bearing(point(max(0, along - 5)), point(min(total, along + 12))) * .pi / 180
+        var encoded = "80"
+        var lastX = 8.0, lastY = 0.0
+        for m in cueVertices where m > along {
+            let v = point(m)
+            let east = (v.lng - origin.lng) * cos(origin.lat * .pi / 180) * 111320
+            let north = (v.lat - origin.lat) * 110540
+            let x = 8 + (east * cos(heading) - north * sin(heading)) / 20
+            let y = (east * sin(heading) + north * cos(heading)) / 10
+            // End the visible road at the first viewport crossing, so an
+            // off-screen bend cannot turn into a false line along the edge.
+            var t = 1.0
+            if x < 0 { t = min(t, -lastX / (x - lastX)) }
+            if x > 15 { t = min(t, (15 - lastX) / (x - lastX)) }
+            if y < 0 { t = min(t, -lastY / (y - lastY)) }
+            if y > 15 { t = min(t, (15 - lastY) / (y - lastY)) }
+            encoded += String(format: "%1X%1X", Int((lastX + t * (x - lastX)).rounded()),
+                              Int((lastY + t * (y - lastY)).rounded()))
+            if t < 1 { break }
+            lastX = x; lastY = y
+        }
+        return encoded.count == 2 ? encoded + "80" : encoded
+    }
+
     private override init() {
         super.init()
         central = CBCentralManager(delegate: self, queue: .main,
@@ -26,6 +100,7 @@ final class NavLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
     @MainActor
     func update(_ navigator: Navigator?) {
         guard let navigator else {
+            cueVertices = []
             navigationActive = false
             send(["v": 1, "active": false])
             central.stopScan()
@@ -63,22 +138,8 @@ final class NavLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate {
         let routeLine: String
         let geometry = navigator.route.polyline
         if geometry.count > 1, let progress = navigator.progress {
-            let cumulative = Geo.cumulative(geometry)
-            let bearing = progress.routeBearing * .pi / 180
-            let cosine = cos(bearing), sine = sin(bearing)
-            let latitudeScale = cos(progress.snapped.lat * .pi / 180) * 111_320.0
-            routeLine = (0..<8).map { index in
-                let point = Geo.point(along: geometry,
-                                      meters: min(cumulative.last ?? 0, progress.alongMeters + Double(index) * 40),
-                                      cumulative: cumulative)
-                let east = (point.lng - progress.snapped.lng) * latitudeScale
-                let north = (point.lat - progress.snapped.lat) * 110_540.0
-                let right = east * cosine - north * sine
-                let ahead = east * sine + north * cosine
-                let x = min(15, max(0, Int(((right + 80) / 160 * 15).rounded())))
-                let y = min(15, max(0, Int((ahead / 280 * 15).rounded())))
-                return String(format: "%1X%1X", x, y)
-            }.joined()
+            routeLine = roadCue(route: navigator.route, along: progress.alongMeters,
+                                nextTurn: maneuver?.alongMeters)
         } else {
             routeLine = ""
         }
