@@ -4,11 +4,6 @@ import Foundation
 import UIKit
 import VelaCore
 
-private struct RoutePoint2D {
-    let x: Double
-    let y: Double
-}
-
 /** Sends the current navigation cue to a nearby MiniNav display over BLE. */
 final class NavLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate, CXCallObserverDelegate {
     static let shared = NavLink()
@@ -35,88 +30,17 @@ final class NavLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate, C
 
     private var cueRouteID: UUID?
     private var routeDistances: [Double] = []
-    private var routeProjectionCos = 1.0
-    private var routeMinX = 0.0
-    private var routeMaxX = 0.0
-    private var routeMinY = 0.0
-    private var routeMaxY = 0.0
-    private var routeCoordinates: [(Int, Int)] = []
-    private var routePath = ""
-
-    private func simplified(_ points: [RoutePoint2D], tolerance: Double) -> [RoutePoint2D] {
-        guard points.count > 2 else { return points }
-        var keep = [Bool](repeating: false, count: points.count)
-        keep[0] = true
-        keep[points.count - 1] = true
-        var ranges: [(Int, Int)] = [(0, points.count - 1)]
-        let toleranceSquared = tolerance * tolerance
-        while let (start, end) = ranges.popLast() {
-            guard end > start + 1 else { continue }
-            let a = points[start], b = points[end]
-            let dx = b.x - a.x, dy = b.y - a.y
-            var largest = toleranceSquared
-            var best: Int?
-            for index in (start + 1)..<end {
-                let p = points[index]
-                let t = min(1, max(0, ((p.x - a.x) * dx + (p.y - a.y) * dy) /
-                                  max(1e-12, dx * dx + dy * dy)))
-                let ex = p.x - (a.x + t * dx), ey = p.y - (a.y + t * dy)
-                let error = ex * ex + ey * ey
-                if error > largest { largest = error; best = index }
-            }
-            if let best {
-                keep[best] = true
-                ranges.append((start, best))
-                ranges.append((best, end))
-            }
-        }
-        return points.indices.compactMap { keep[$0] ? points[$0] : nil }
-    }
-
-    // Cache the whole route once. Coordinates are a compact 32x16 overview; the cursor moves on it.
-    private func cacheRoute(_ route: Route) {
-        cueRouteID = route.id
-        routeDistances = Geo.cumulative(route.polyline)
-        routeCoordinates = []
-        routePath = ""
-        guard route.polyline.count > 1 else { return }
-        let referenceLatitude = route.polyline.map(\.lat).reduce(0, +) / Double(route.polyline.count)
-        routeProjectionCos = max(0.01, cos(referenceLatitude * .pi / 180))
-        let projected = route.polyline.map {
-            RoutePoint2D(x: $0.lng * routeProjectionCos, y: $0.lat)
-        }
-        var tolerance = 0.00002
-        var reduced = simplified(projected, tolerance: tolerance)
-        while reduced.count > 24 {
-            tolerance *= 1.7
-            reduced = simplified(projected, tolerance: tolerance)
-        }
-        routeMinX = reduced.map(\.x).min() ?? 0
-        routeMaxX = reduced.map(\.x).max() ?? 0
-        routeMinY = reduced.map(\.y).min() ?? 0
-        routeMaxY = reduced.map(\.y).max() ?? 0
-        routeCoordinates = reduced.map(encodeRoutePoint)
-        routePath = routeCoordinates.map { String(format: "%02X%1X", $0.0, $0.1) }.joined()
-    }
-
-    private func encodeRoutePoint(_ point: RoutePoint2D) -> (Int, Int) {
-        let width = routeMaxX - routeMinX
-        let height = routeMaxY - routeMinY
-        let nx = width > 1e-10 ? (point.x - routeMinX) / width : 0.5
-        let ny = height > 1e-10 ? (routeMaxY - point.y) / height : 0.5
-        let x = min(30, max(1, Int((1 + nx * 29).rounded())))
-        let y = min(14, max(1, Int((1 + ny * 13).rounded())))
-        return (x, y)
-    }
-
     private func routeCue(route: Route, along measured: Double) -> (path: String, cursor: String) {
-        if cueRouteID != route.id { cacheRoute(route) }
+        if cueRouteID != route.id {
+            cueRouteID = route.id
+            routeDistances = Geo.cumulative(route.polyline)
+        }
         guard let total = routeDistances.last, total > 0, measured.isFinite,
               route.polyline.count > 1 else { return ("", "") }
 
         // Keep the BLE cue compact: eight local XY nibble pairs (16 characters)
         // describe the road ahead relative to the rider. The full-route overview
-        // made cue writes large enough for CoreBluetooth to use long writes.
+        // is not needed by the local cue renderer.
         let along = min(total, max(0, measured))
         func point(_ meters: Double) -> LatLng {
             Geo.point(along: route.polyline, meters: meters, cumulative: routeDistances)
@@ -203,8 +127,6 @@ final class NavLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate, C
         guard let navigator else {
             cueRouteID = nil
             routeDistances = []
-            routeCoordinates = []
-            routePath = ""
             navigationActive = false
             latestCue = ["v": 1, "active": false, "call": callStatus]
             send(latestCue)
@@ -281,7 +203,7 @@ final class NavLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate, C
             "lm": String(laneMask, radix: 16, uppercase: true),
             "lh": String((laneGuide?.words ?? "").prefix(12)),
             "rp": routeCue.path,
-            "rc": routeCue.cursor,
+            "rpf": 2,
             "sd": splitSide == "left" ? "L" : (splitSide == "right" ? "R" : ""),
             "arrived": navigator.arrived
         ]
@@ -306,11 +228,12 @@ final class NavLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate, C
     }
 
     private func transmit(_ data: Data, to peripheral: CBPeripheral, characteristic: CBCharacteristic) {
-        let maxLength = peripheral.maximumWriteValueLength(for: .withResponse)
+        let maxLength = min(120, min(peripheral.maximumWriteValueLength(for: .withResponse),
+                                     peripheral.maximumWriteValueLength(for: .withoutResponse)))
         let headerLength = 8
         guard maxLength > headerLength else { return }
-        // Leave the frame comfortably below the negotiated ATT MTU so iOS sends
-        // an ordinary Write Request instead of a Prepare/Execute long write.
+        // The withResponse limit can permit long writes. Also cap to the
+        // withoutResponse limit (ATT MTU minus 3) and 120 bytes per frame.
         let chunkLength = min(maxLength - headerLength, 112)
         let chunkCount = max(1, (data.count + chunkLength - 1) / chunkLength)
         guard chunkCount <= 255 else { return }
