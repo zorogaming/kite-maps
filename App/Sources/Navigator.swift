@@ -99,7 +99,7 @@ final class Navigator: ObservableObject {
     /** A phone (or FaceTime, WhatsApp...) call is going on. */
     private var onCall: Bool { calls.calls.contains { !$0.hasEnded } }
     /** "left" or "right": which side of the road the place is, at the end of the route. */
-    private var destinationSide: String? { route.mode == .drive ? Geo.sideAtEnd(destination.location, of: route.polyline) : nil }
+    private var destinationSide: String? { route.mode.isMotorized ? Geo.sideAtEnd(destination.location, of: route.polyline) : nil }
     /** The whole route's road data has come in live, so what's remembered no longer stands in. */
     private var fullRoadData = false
     /** The limits came from the road matcher, which knows every road on the route. */
@@ -220,7 +220,7 @@ final class Navigator: ObservableObject {
      */
     var limitDropAhead: LimitDrop? {
         if let demoLimitDrop { return demoLimitDrop }
-        guard route.mode == .drive, !arrived, let p = progress, !p.offRoute,
+        guard route.mode.isMotorized, !arrived, let p = progress, !p.offRoute,
               let next = route.nextLimitDrop(at: p.alongMeters, within: NavZoom.limitHeadsUp(speed: speedMps)),
               let kmh = next.kmh else { return nil }
         let meters = next.startMeters - p.alongMeters
@@ -247,7 +247,7 @@ final class Navigator: ObservableObject {
      * roundabout (said with the roundabout) or arriving.
      */
     private func thenWords(_ i: Int) -> String {
-        guard route.mode == .drive, i < route.maneuvers.count,
+        guard route.mode.isMotorized, i < route.maneuvers.count,
               let j = route.maneuvers[(i + 1)...].firstIndex(where: { !$0.silent }) else { return "" }
         let a = route.maneuvers[i], b = route.maneuvers[j]
         guard !b.leavesRoundabout, b.type != .arrive, b.alongMeters - a.alongMeters < 70 else { return "" }
@@ -278,7 +278,7 @@ final class Navigator: ObservableObject {
      * two). Not near the end of the route, where stopping matters, and never off the route.
      */
     private func estimate(_ gap: TimeInterval) {
-        guard !arrived, !stopped, route.mode == .drive, gap > 3, !rerouting, let p = progress, let last = lastFix else { return }
+        guard !arrived, !stopped, route.mode.isMotorized, gap > 3, !rerouting, let p = progress, let last = lastFix else { return }
         if estimateFrom == nil {
             guard !p.offRoute, p.offsetMeters < 30, speedMps >= 5, p.remainingMeters > 400 else { return }
             // Started again after a new route was taken mid-tunnel: from where the estimate had got to, now.
@@ -339,7 +339,7 @@ final class Navigator: ObservableObject {
         let offRoad = p.offsetMeters > 20 || p.remainingMeters < 40 || (toPin < 60 && nearPin)
         // Parked by the pin with the route still going round (a way in the map doesn't have): three minutes.
         let parked = stoppedNearEnd.map { loc.timestamp.timeIntervalSince($0) > (p.remainingMeters >= 150 && !nearPin ? 180 : offRoad ? 20 : 90) } ?? false
-        if p.arrived || parked || (route.mode == .drive && toPin < 40 && nearPin) {
+        if p.arrived || parked || (route.mode.isMotorized && toPin < 40 && nearPin) {
             arrived = true
             fasterOffer = nil
             fasterRoute = nil
@@ -376,7 +376,7 @@ final class Navigator: ObservableObject {
         checkAircraft(loc)
         checkZones(p)
         checkStops(p)
-        if route.mode == .drive, AppSettings.shared.speedingAlert,
+        if route.mode.isMotorized, AppSettings.shared.speedingAlert,
            speeding.update(speedKmh: loc.speed >= 0 ? loc.speed * 3.6 : nil, limitKmh: speedLimitKmh, now: loc.timestamp.timeIntervalSince1970) {
             speak("You're over the speed limit.", alert: true)
         }
@@ -405,7 +405,7 @@ final class Navigator: ObservableObject {
         let start = route
         quietMerges = []
         // "Merge onto…" only where a lane really ends: a slip road that becomes a lane of its own is said nothing.
-        if route.mode == .drive, start.maneuvers.contains(where: { $0.type == .merge && !$0.silent }) {
+        if route.mode.isMotorized, start.maneuvers.contains(where: { $0.type == .merge && !$0.silent }) {
             Task {
                 guard let q = await Merges.quietLaneGains(start.maneuvers, line: start.polyline), self.route.id == start.id else { return }
                 self.quietMerges = Set(q.filter { $0.type == .merge && $0.silent }.map(\.alongMeters))
@@ -467,7 +467,7 @@ final class Navigator: ObservableObject {
         signalMeters = []
         stopMeters = []
         let s = AppSettings.shared
-        guard route.mode == .drive else { return }
+        guard route.mode.isMotorized else { return }
         let line = route.polyline, id = route.id
         let speed = s.speedCameras, plate = s.plateCameras
         // Waze's speed cameras too, while Waze is switched on.
@@ -868,7 +868,7 @@ final class Navigator: ObservableObject {
         let m = route.maneuvers[i]
         let d = p.distanceToNext
         let stage = spokenStage[i] ?? 0
-        let drive = route.mode == .drive
+        let drive = route.mode.isMotorized
         let now = drive ? max(40, speedMps * 4) : 15
         let near = drive ? max(250, speedMps * 12) : 60
         let far = drive ? max(1000, speedMps * 40) : 250
@@ -1063,7 +1063,7 @@ final class Navigator: ObservableObject {
         }
         let from = LatLng(loc.coordinate.latitude, loc.coordinate.longitude)
         // Only while driving: on foot or a bike, turning round is fine.
-        let course = route.mode == .drive ? heading(loc) : nil
+        let course = route.mode.isMotorized ? heading(loc) : nil
         let mode = route.mode
         let to = destination.location
         let hw = avoidHighways, tolls = avoidTolls

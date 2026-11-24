@@ -21,7 +21,7 @@ public enum OSRM {
      * Waze reroute: never a U-turn back down the road you're already on.
      */
     static func routeURL(from a: LatLng, to b: LatLng, mode: TravelMode, via: [LatLng] = [], heading: Double? = nil) -> URL {
-        let profile = mode == .drive ? "driving" : (mode == .bike ? "bike" : "foot")
+        let profile = mode.osrmProfile
         let pts = [a] + via + [b]
         let coords = pts.map { "\($0.lng.plain),\($0.lat.plain)" }.joined(separator: ";")
         var s = "https://routing.openstreetmap.de/\(mode.osrmBackend)/route/v1/\(profile)/\(coords)" +
@@ -59,7 +59,7 @@ public enum OSRM {
         let total = cum.last ?? 0
         let n = min(99, max(1, Int(total / 150)))
         let pts = (0...n).map { Geo.point(along: line, meters: total * Double($0) / Double(n), cumulative: cum) }
-        let profile = mode == .drive ? "driving" : (mode == .bike ? "bike" : "foot")
+        let profile = mode.osrmProfile
         let coords = pts.map { String(format: "%.6f,%.6f", $0.lng, $0.lat) }.joined(separator: ";")
         let radii = Array(repeating: "25", count: pts.count).joined(separator: ";")
         return URL(string: "https://routing.openstreetmap.de/\(mode.osrmBackend)/match/v1/\(profile)/\(coords)" +
@@ -84,7 +84,7 @@ public enum OSRM {
         }
         pts.append(line[line.count - 1])
         bearings.append(nil)
-        let profile = mode == .drive ? "driving" : (mode == .bike ? "bike" : "foot")
+        let profile = mode.osrmProfile
         let coords = pts.map { String(format: "%.6f,%.6f", $0.lng, $0.lat) }.joined(separator: ";")
         let b = bearings.map { $0.map { "\(Int($0)),45" } ?? "" }.joined(separator: ";")
         let radii = pts.indices.map { $0 == 0 || $0 == pts.count - 1 ? "unlimited" : "30" }.joined(separator: ";")
@@ -450,7 +450,7 @@ public enum OSRM {
         let newRoad = road.flatMap { $0 == signs.from ? nil : $0 }
         switch type {
         case "depart":
-            let verb = mode == .drive ? "Drive" : (mode == .bike ? "Ride" : "Walk")
+            let verb = mode == .drive ? "Drive" : (mode == .motorcycle || mode == .bike ? "Ride" : "Walk")
             return road.map { "\(verb) along \($0)" } ?? "Head out"
         case "arrive": return "You have arrived"
         case "roundabout turn" where exit == nil:
@@ -540,6 +540,17 @@ public enum Directions {
                               avoidHighways: Bool = false, avoidTolls: Bool = false,
                               useGoogle: Bool = true, via: [LatLng] = [], heading: Double? = nil,
                               alternatives: Bool = false) async -> Result {
+        if mode == .motorcycle {
+            do {
+                let candidates = try await Valhalla.motorcycleRoutes(from: a, to: b, via: via,
+                                                                      heading: heading, avoidHighways: avoidHighways,
+                                                                      avoidTolls: avoidTolls, alternatives: alternatives)
+                let routes = candidates.filter { reaches($0.polyline, from: a, to: b) }
+                return routes.isEmpty ? Result(routes: [], error: "No motorcycle route found.") : Result(routes: routes)
+            } catch {
+                return Result(routes: [], error: error.localizedDescription)
+            }
+        }
         // Ask both at once: Google's route knows traffic, OSRM's steps read better (Vela puts
         // the open router's turn-by-turn on Google's line the same way).
         let osrmTask = Task { try await OSRM.route(from: a, to: b, mode: mode, via: via, heading: heading) }

@@ -182,7 +182,7 @@ enum Fmt {
         return m == 0 ? "\(h) h" : "\(h) h \(m) min"
     }
 
-    /** "2h 18m": the same, shorter, for the travel mode tabs where four have to fit side by side. */
+    /** "2h 18m": the same, shorter, for the travel mode tabs where five have to fit side by side. */
     static func shortDuration(_ s: Double) -> String {
         let mins = max(1, Int((s / 60).rounded()))
         if mins < 60 { return "\(mins) min" }

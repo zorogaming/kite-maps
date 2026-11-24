@@ -757,7 +757,7 @@ final class AppModel: ObservableObject {
             directions?.loading.insert(m)
             Task {
                 let r = await Directions.routes(from: from, to: to, mode: m, avoidHighways: hw, avoidTolls: tolls, useGoogle: google, via: via,
-                                                heading: m == .drive ? heading : nil, alternatives: true)
+                                                heading: m.isMotorized ? heading : nil, alternatives: true)
                 guard directions?.destination.id == d.destination.id, routesRequest == req else { return }
                 directions?.loading.remove(m)
                 // The fastest first, so it's the one picked (Matteo, 2026-11-13: a bike route marked
@@ -858,7 +858,7 @@ final class AppModel: ObservableObject {
         }
         resumeOffer = nil
         rememberTrip(n)
-        location.setNavigating(true, mode: route.mode.rawValue)
+        location.setNavigating(true, mode: route.mode)
         map?.showsUserLocation = false
         if let loc = location.last { n.handle(loc); followCamera(n, loc, animated: false) }
         LiveTurn.shared.start(n)
@@ -1048,7 +1048,7 @@ final class AppModel: ObservableObject {
         let p = n.progress
         // Further out on long stretches, closer in and flatter just before a turn (see NavZoom).
         // Then the zoom setting (Closer, Normal, Wider) and the 3D, 2D or north-up button.
-        let view = NavZoom.view(speed: loc.speed, toNext: p?.distanceToNext, next: n.nextManeuver?.type, driving: n.route.mode == .drive)
+        let view = NavZoom.view(speed: loc.speed, toNext: p?.distanceToNext, next: n.nextManeuver?.type, driving: n.route.mode.isMotorized)
             .applying(settings.mapZoom, settings.driveLook)
         glide.look = settings.driveLook
         glide.fix(n, loc, across: view.across, pitch: view.pitch, jump: !animated)

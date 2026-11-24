@@ -8,6 +8,60 @@ import Foundation
  */
 public enum Valhalla {
     static let endpoint = URL(string: "https://valhalla1.openstreetmap.de/trace_attributes")!
+    private static let routeEndpoint = URL(string: "https://valhalla1.openstreetmap.de/route")!
+
+    /** Motorcycle-specific routes and turn instructions from the open Valhalla router. */
+    public static func motorcycleRoutes(from start: LatLng, to destination: LatLng, via: [LatLng] = [],
+                                        heading: Double? = nil, avoidHighways: Bool = false,
+                                        avoidTolls: Bool = false, alternatives: Bool = false) async throws -> [Route] {
+        let points = [start] + via + [destination]
+        let locations: [[String: Any]] = points.enumerated().map { index, point in
+            var location: [String: Any] = [
+                "lat": point.lat,
+                "lon": point.lng,
+                "type": index == 0 || index == points.count - 1 ? "break" : "through",
+            ]
+            if index == 0, let heading { location["heading"] = heading }
+            if index == 0, heading != nil { location["heading_tolerance"] = 60 }
+            return location
+        }
+        var motorcycleOptions: [String: Any] = [
+            "use_highways": avoidHighways ? 0.0 : 0.5,
+            "use_trails": 0.0,
+        ]
+        if avoidTolls { motorcycleOptions["use_tolls"] = 0.0 }
+        var body: [String: Any] = [
+            "locations": locations,
+            "costing": "motorcycle",
+            "costing_options": ["motorcycle": motorcycleOptions],
+            "format": "osrm",
+            "shape_format": "polyline6",
+            "units": "kilometers",
+            "language": "en-US",
+            "roundabout_exits": true,
+            "turn_lanes": true,
+        ]
+        if alternatives, via.isEmpty { body["alternates"] = 2 }
+        var request = URLRequest(url: routeEndpoint)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue(OSRM.userAgent, forHTTPHeaderField: "User-Agent")
+        request.timeoutInterval = 25
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let (data, response) = try await URLSession.shared.data(for: request)
+        if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
+            throw VelaError.http(http.statusCode)
+        }
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any], root["error"] == nil else {
+            throw VelaError.unexpectedResponse(String(data: data.prefix(200), encoding: .utf8) ?? "Valhalla motorcycle route")
+        }
+        return OSRM.parse(data, mode: .motorcycle).map { route in
+            var route = route
+            route.source = "osm"
+            StepMerge.tidy(&route.maneuvers)
+            return Roundabouts.settle(route)
+        }
+    }
 
     private static let session: URLSession = {
         let c = URLSessionConfiguration.ephemeral

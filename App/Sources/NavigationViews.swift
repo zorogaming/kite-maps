@@ -308,7 +308,7 @@ struct InstructionBanner: View {
         let refs = RoadRefs.find(m?.instruction ?? "")
         // A long way to the next turn (over 2 miles, on a motorway say): one slim line, and the map gets
         // the room. It grows back to full size well before the first spoken heads-up.
-        if nav.route.mode == .drive, let p = nav.progress, p.distanceToNext > 3200, m?.type != .arrive {
+        if nav.route.mode.isMotorized, let p = nav.progress, p.distanceToNext > 3200, m?.type != .arrive {
             HStack(spacing: 10) {
                 Image(systemName: maneuverSymbol(m?.type ?? .straight)).font(.system(size: 22, weight: .heavy))
                     .foregroundColor(Vela.accentText(scheme))
@@ -1088,7 +1088,7 @@ struct RouteWazeSummary: View {
         }
         .task(id: route.id) {
             if Self.demo != nil { return }
-            guard settings.wazeOn, route.mode == .drive else { found = nil; onFound?([]); return }
+            guard settings.wazeOn, route.mode.isMotorized else { found = nil; onFound?([]); return }
             found = nil
             onFound?([])
             // Closures from the live map, and drivers' reports (crashes, police, hazards) from Waze's

@@ -497,11 +497,12 @@ struct ModeTabs: View {
         case .drive: return "car.fill"
         case .bike: return "bicycle"
         case .walk: return "figure.walk"
+        case .motorcycle: return "motorcycle"
         }
     }
 
     var body: some View {
-        // Four equal tiles, always all in view, so the right one is easy to hit.
+        // Five equal mode tiles, kept in view so each stays easy to tap.
         HStack(spacing: 8) {
             ForEach(TravelMode.allCases) { m in
                 let on = !state.transit && m == state.mode

@@ -688,7 +688,7 @@ struct VelaMapView: UIViewRepresentable {
             let line = model.nav?.route.polyline ?? model.directions?.route?.polyline ?? []
             let waze = s.speedCameras && s.wazeOn
             // While driving, only what's on your way stands out: everything off the route fades back.
-            let driving = model.nav?.route.mode == .drive
+            let driving = model.nav?.route.mode.isMotorized == true
             let key = "\(s.speedCameras)\(s.plateCameras)\(s.surveillanceCameras)\(surveillance.count)\(cameras.count)\(line.count)\(line.first?.lat ?? 0)\(waze)\(WazeCameras.shared.version)\(driving)"
             guard key != lastCameraKey else { return }
             lastCameraKey = key
@@ -777,7 +777,7 @@ struct VelaMapView: UIViewRepresentable {
             // While navigating, drivers' reports from Waze's app servers too (the live map has only closures).
             let live = model.nav?.liveAlerts ?? (model.directions != nil ? model.routeReports : [])
             // While driving, reports off your route fade back so the ones you'll meet stand out.
-            let route = model.nav?.route.mode == .drive ? model.nav?.route.polyline ?? [] : []
+            let route = model.nav?.route.mode.isMotorized == true ? model.nav?.route.polyline ?? [] : []
             let key = "\(s.wazeOn)\(s.wazeOnMap)\(s.wazeHeatmap)\(s.wazeMaxAge)\(kinds)\(wazeAt.timeIntervalSince1970)\(history.count)\(live.map(\.id).joined())\(route.count)\(route.first?.lat ?? 0)"
             guard key != lastWazeKey else { return }
             lastWazeKey = key

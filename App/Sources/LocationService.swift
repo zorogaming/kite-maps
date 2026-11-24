@@ -1,6 +1,7 @@
 import CoreLocation
 import Foundation
 import UIKit
+import VelaCore
 
 /** GPS for search bias and navigation. The map draws its own blue dot; this feeds the app. */
 @MainActor
@@ -27,8 +28,8 @@ final class LocationService: NSObject, ObservableObject, CLLocationManagerDelega
     }
 
     /** Full-rate GPS that keeps running with the screen off, for a drive. */
-    func setNavigating(_ on: Bool, mode: Int = 0) {
-        manager.activityType = mode == 0 ? .automotiveNavigation : .fitness
+    func setNavigating(_ on: Bool, mode: TravelMode = .drive) {
+        manager.activityType = mode.isMotorized ? .automotiveNavigation : .fitness
         manager.distanceFilter = kCLDistanceFilterNone
         manager.desiredAccuracy = on ? kCLLocationAccuracyBestForNavigation : kCLLocationAccuracyBest
         manager.allowsBackgroundLocationUpdates = on

@@ -1,15 +1,20 @@
 import Foundation
 
 public enum TravelMode: Int, CaseIterable, Identifiable, Sendable {
-    case drive = 0, bike = 1, walk = 2
+    // Keep the stored values stable; motorcycle sits next to bicycle in the mode picker.
+    case drive = 0, bike = 1, motorcycle = 3, walk = 2
 
     public var id: Int { rawValue }
+
+    /** A road vehicle that should use road navigation behavior and higher-speed cue timing. */
+    public var isMotorized: Bool { self == .drive || self == .motorcycle }
 
     public var label: String {
         switch self {
         case .drive: return "Drive"
         case .bike: return "Bike"
         case .walk: return "Walk"
+        case .motorcycle: return "Motorcycle"
         }
     }
 
@@ -19,6 +24,16 @@ public enum TravelMode: Int, CaseIterable, Identifiable, Sendable {
         case .drive: return "routed-car"
         case .bike: return "routed-bike"
         case .walk: return "routed-foot"
+        case .motorcycle: return "routed-car" // Motorcycle routes use Valhalla directly.
+        }
+    }
+
+    /** A harmless car-profile fallback for OSRM-only helpers; actual motorcycle routes use Valhalla. */
+    var osrmProfile: String {
+        switch self {
+        case .drive, .motorcycle: return "driving"
+        case .bike: return "bike"
+        case .walk: return "foot"
         }
     }
 }

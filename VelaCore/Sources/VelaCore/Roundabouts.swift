@@ -265,7 +265,7 @@ public enum Roundabouts {
      * Nil when there are none, or OpenStreetMap didn't answer.
      */
     public static func addMinis(to route: Route) async -> Route? {
-        guard route.mode == .drive, route.polyline.count >= 2 else { return nil }
+        guard route.mode.isMotorized, route.polyline.count >= 2 else { return nil }
         // A point every 40 m or so is close enough for "within 15 m of the line", and keeps a long drive's query small.
         var line = [route.polyline[0]]
         for p in route.polyline.dropFirst() where line[line.count - 1].distance(to: p) >= 40 { line.append(p) }
@@ -313,13 +313,13 @@ public enum Roundabouts {
                 r.maneuvers[i].roundabout = s.shape
                 r.maneuvers[i].lanes = []
                 r.maneuvers[i].laneHint = nil
-                r.maneuvers[i].instruction = OSRM.instruction(type: "roundabout", modifier: nil, road: road, exit: n, mode: .drive)
+                r.maneuvers[i].instruction = OSRM.instruction(type: "roundabout", modifier: nil, road: road, exit: n, mode: route.mode)
             } else {
                 // Over it with no step: a new one, with the road it leads onto when that's a different road.
                 let k = r.maneuvers.lastIndex { $0.alongMeters <= p.along } ?? 0
                 let current = r.maneuvers[...k].last { $0.road != nil }?.road
                 let onto = s.road.flatMap { $0 == current ? nil : $0 }
-                var m = Maneuver(type: .roundabout, instruction: OSRM.instruction(type: "roundabout", modifier: nil, road: onto, exit: n, mode: .drive),
+                var m = Maneuver(type: .roundabout, instruction: OSRM.instruction(type: "roundabout", modifier: nil, road: onto, exit: n, mode: route.mode),
                                  location: Geo.point(along: route.polyline, meters: p.along, cumulative: cum), alongMeters: p.along,
                                  distanceMeters: 0, road: s.road ?? current, exit: n, roundabout: s.shape)
                 if k + 1 < r.maneuvers.count { m.distanceMeters = r.maneuvers[k + 1].alongMeters - p.along }
