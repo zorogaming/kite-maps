@@ -272,6 +272,7 @@ final class NavLink: NSObject, CBCentralManagerDelegate, CBPeripheralDelegate, C
             "gps": gpsBars,
             "v": 1,
             "active": true,
+            "rerouting": navigator.rerouting,
             "call": callStatus,
              "turn": maneuver?.type.rawValue ?? "straight",
             "road": String((maneuver?.road ?? "").prefix(16)),
